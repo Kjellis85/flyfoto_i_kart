@@ -49,19 +49,22 @@ def search_nb_images(search_term, page_size=100, max_results=None):
     df = pd.DataFrame(all_data)
 
     # Splitte geographics-kolonnen
-    geo_df = df['geographics'].str.split('[;:,? &]+', expand=True)
-    df['Land'] = geo_df[0]
-    df['Fylke'] = geo_df[1]
-    df['Kommune'] = geo_df[2]
+    geo_df = df['geographics'].str.split('[;:,?&]+', expand=True)
+    df['Land'] = geo_df[0].str.split('[;:,?&]+', expand=True)
+    df['Fylke'] = geo_df[1].str.split('[;,?&]+', expand=True)
+    df['Kommune'] = geo_df[2].str.split('[;,?&]+', expand=True)
 
-    # Splitte Kommune-kolonnen videre
-    kommune_df = df['Kommune'].str.split('[;:,? &]', expand=True)
-    for i in range(kommune_df.shape[1]):
-        df[f'Sted_{i + 1}'] = kommune_df[i]
+    # Resten av strengen etter 'Kommune' vil være de individuelle stedene
+    # Vi samler disse i en egen kolonne for videre splitting
+    df['Steder'] = geo_df.loc[:, 3:].apply(lambda x: ','.join(x.dropna()), axis=1)
 
+    # Splitte 'Steder'-kolonnen ved komma og mellomrom for å få de individuelle 'Sted_'-kolonnene
+    steder_df = df['Steder'].str.split('[;:,?&]+', expand=True)
+    for i in range(steder_df.shape[1]):
+        df[f'Sted_{i + 1}'] = steder_df[i].str.strip()
 
-    # Fjerne den opprinnelige geographics-kolonnen
-    df.drop('geographics', axis=1, inplace=True)
+    # Fjerne midlertidige kolonner som ikke lenger er nødvendige
+    df.drop(['geographics', 'Steder'], axis=1, inplace=True)
 
     return df
 
