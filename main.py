@@ -1,13 +1,18 @@
 # main.py
 
+import math
 from nb_api_functions import search_nb_images, save_to_excel, add_coordinates_to_table
+
 
 def main():
     search_term = input('Skriv inn søkeord: ')
-    max_treff_input = input('Hvor mange treff ønsker du? (Skriv et tall eller "alle" for alle treff): ')
-    max_treff = None if max_treff_input.lower() == 'alle' else int(max_treff_input)
+    total_treff_input = input('Hvor mange treff ønsker du totalt? (Skriv et tall): ')
+    total_treff = int(total_treff_input)
 
-    df = search_nb_images(search_term, max_results=max_treff)
+    # Beregn antall sider basert på antall treff, avrundet opp til nærmeste hundre
+    max_sider = math.ceil(total_treff / 100)
+
+    df = search_nb_images(search_term, max_pages=max_sider)
 
     if df is not None and not df.empty:
         # Kjør funksjonen for å legge til koordinater
@@ -17,6 +22,7 @@ def main():
         save_to_excel(df, excel_filename)
     else:
         print("Ingen resultater med geografisk informasjon funnet.")
+
 
 if __name__ == '__main__':
     main()

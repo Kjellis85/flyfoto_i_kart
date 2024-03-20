@@ -2,64 +2,70 @@
 
 import requests
 import pandas as pd
+import urllib.parse
 
 
-def search_nb_images(search_term, page_size=100, max_results=None):
+
+def search_nb_images(search_term, page_size=100, max_pages=None):
     api_url = 'https://api.nb.no/catalog/v1/items'
     all_data = []
     current_page = 0
-    total_results_fetched = 0
 
     while True:
-        if max_results is not None and total_results_fetched >= max_results:
+        if max_pages is not None and current_page >= max_pages:
             break
 
         params = {
             'q': search_term,
             'filter': 'mediatype:bilder',
-            'size': page_size if not max_results else min(page_size, max_results - total_results_fetched),
+            'size': page_size,
             'page': current_page
         }
         response = requests.get(api_url, params=params)
         if response.status_code == 200:
             results = response.json()
             for item in results['_embedded']['items']:
-                if max_results is not None and total_results_fetched >= max_results:
-                    break
                 geographics = item['metadata'].get('subject', {}).get('geographics')
                 if geographics:
-                    thumbnail_custom = item['_links'].get('thumbnail_custom', {}).get('href')
-                    if thumbnail_custom:  # Sjekk om thumbnail_custom er None
-                        thumbnail_custom = thumbnail_custom.replace('{width},{height}', 'full')
-                    title = item['metadata'].get('title')
-                    all_data.append({
-                        'thumbnail_custom': thumbnail_custom,
-                        'title': title,
-                        'geographics': geographics[0] if geographics else None
-                    })
-                    total_results_fetched += 1
+                    geographic_parts = geographics[0].split(';')
+                    # Filtrer ut "Norge" eller "null" fra geografisk informasjon
+                    geographic_parts = [part for part in geographic_parts if part.lower() not in ('norge', 'null')]
+                    if len(geographic_parts) >= 3:
+                        # Fjern "Land" og behandle resten av geografisk informasjon
+                        fylke = geographic_parts[1]
+                        kommune = geographic_parts[2]
+                        steder = geographic_parts[3:]
+                        thumbnail_custom = item['_links'].get('thumbnail_custom', {}).get('href')
+                        if thumbnail_custom:  # Sjekk om thumbnail_custom er None
+                            thumbnail_custom = thumbnail_custom.replace('{width},{height}', 'full')
+                        title = item['metadata'].get('title')
+                        all_data.append({
+                            'thumbnail_custom': thumbnail_custom,
+                            'title': title,
+                            'Fylke': fylke,
+                            'Kommune': kommune,
+                            'Steder': ', '.join(steder), # Konverter liste til streng
+                            'geographics': geographics[0] if geographics else None
+                        })
             if current_page >= results['page']['totalPages'] - 1:
                 break
-            else:
-                current_page += 1
+            current_page += 1
         else:
             print(f'Error: {response.status_code}')
             break
 
     df = pd.DataFrame(all_data)
 
-    # Splitte geographics-kolonnen
-    geo_df = df['geographics'].str.split('[;:,?&]+', expand=True)
-    df['Land'] = geo_df[0].str.split('[;:,?&]+', expand=True)
-    df['Fylke'] = geo_df[1].str.split('[;,?&]+', expand=True)
-    df['Kommune'] = geo_df[2].str.split('[;,?&]+', expand=True)
+    geo_df = df['geographics'].str.split('[;:,?&]', expand=True)
+    df['Fylke'] = geo_df[1].str.strip() if geo_df.shape[1] > 1 else None
+    df['Kommune'] = geo_df[2].str.strip() if geo_df.shape[1] > 2 else None
 
     # Resten av strengen etter 'Kommune' vil være de individuelle stedene
     # Vi samler disse i en egen kolonne for videre splitting
-    df['Steder'] = geo_df.loc[:, 3:].apply(lambda x: ','.join(x.dropna()), axis=1)
+    df['Steder'] = geo_df.loc[:, 3:].apply(lambda x: ','.join(x.dropna().astype(str)), axis=1)
 
-    # Splitte 'Steder'-kolonnen ved komma og mellomrom for å få de individuelle 'Sted_'-kolonnene
-    steder_df = df['Steder'].str.split('[;:,?&]+', expand=True)
+    # Splitte 'Steder'-kolonnen ved komma for å få de individuelle 'Sted_'-kolonnene
+    steder_df = df['Steder'].str.split('[;:,?&]', expand=True)
     for i in range(steder_df.shape[1]):
         df[f'Sted_{i + 1}'] = steder_df[i].str.strip()
 
@@ -78,54 +84,44 @@ def save_to_excel(df, filename):
 
 # Funksjon for å bygge API-parametere basert på tilgjengelige kolonner
 def build_api_params(row):
-    # Søk etter kommunenavn først, deretter fylkesnavn, til slutt land
-    search_term = None
-    if pd.notnull(row['Kommune']) and row['Kommune'].strip():
-        search_term = row['Kommune'].strip()
-    elif pd.notnull(row['Fylke']) and row['Fylke'].strip():
-        search_term = row['Fylke'].strip()
-    elif pd.notnull(row['Land']) and row['Land'].strip():
-        search_term = row['Land'].strip()
-
-    if search_term and 1 <= len(search_term) <= 100:  # Sjekk at søkeordet er innenfor gyldig lengde
-        return {
-            'sok': search_term,
-            'fuzzy': 'true',  # Hvis du ønsker fuzzy-søk
-            'utkoordsys': '25833',# Angi ønsket koordinatsystem
-            'treffPerSide': '1',
-            'side': '1'
-        }
-    else:
-        return None  # Ingen gyldig søkestreng å sende
+    # Start fra den siste utfylte kolonnen og jobb deg bakover
+    search_columns = ['Sted_5', 'Sted_4', 'Sted_3', 'Sted_2','Sted_1', 'Kommune', 'Fylke']
+    for col in search_columns:
+        if col in row and pd.notnull(row[col]) and row[col].strip():
+            search_term = row[col].strip()
+            if 1 <= len(search_term) <= 100:  # Sjekk at søkeordet er innenfor gyldig lengde
+                return {
+                    'sok': search_term,
+                    'fuzzy': 'true',  # Hvis du ønsker fuzzy-søk
+                    'utkoordsys': '25833',  # Angi ønsket koordinatsystem
+                    'treffPerSide': '1',
+                    'side': '1'
+                }
+    return None  # Ingen gyldig søkestreng å sende
 
 
-def get_coordinates(params):
-    if not params:
-        return None, None  # Ingen søkeparametere tilgjengelig
+def get_coordinates(sok, fuzzy='true', utkoordsys='25833', treffPerSide='1', side='1'):
     base_url = "https://ws.geonorge.no/stedsnavn/v1/sted"
+    # Konstruer URL-en manuelt
+    full_url = f"{base_url}?sok={sok}&fuzzy={fuzzy}&utkoordsys={utkoordsys}&treffPerSide={treffPerSide}&side={side}"
     try:
-        # Forbered forespørselen for å få den fullstendige URL-en
-        prepared_request = requests.Request('GET', base_url, params=params).prepare()
-        # Skriv ut den fullstendige URL-en
-        #print(f"Full URL: {prepared_request.url}")
-
-        # Send forespørselen
-        response = requests.Session().send(prepared_request)
+        # Send forespørselen direkte med den fullstendige URL-en
+        response = requests.get(full_url)
         response.raise_for_status()  # Vil kaste en HTTPError hvis statusen er 4xx eller 5xx
         data = response.json()
 
         # Sjekk om det er treff i responsen og hent ut koordinatene
         if data['metadata']['totaltAntallTreff'] > 0:
-            sted = data['navn'][0]  # Anta at vi tar det første treffet
-            if 'representasjonspunkt' in sted:
-                nord = sted['representasjonspunkt']['nord']
-                øst = sted['representasjonspunkt']['øst']
-                return nord, øst
+            for sted in data['navn']:  # Iterer gjennom alle treffene
+                if 'representasjonspunkt' in sted and sted['representasjonspunkt']:
+                    nord = sted['representasjonspunkt']['nord']
+                    øst = sted['representasjonspunkt']['øst']
+                    return nord, øst  # Returner koordinatene for det første gyldige treffet
     except requests.HTTPError as http_err:
         print(f"HTTP error occurred: {http_err}")  # HTTP-feil
     except Exception as err:
         print(f"An error occurred: {err}")  # Andre feil
-    return None, None
+    return None, None  # Returner None hvis det ikke finnes koordinater eller en feil oppstår
 
 
 # Funksjon for å legge til koordinater i tabellen
@@ -137,7 +133,7 @@ def add_coordinates_to_table(df):
     for index, row in df.iterrows():
         params = build_api_params(row)
         if params:  # Sørg for at det er søkeparametere
-            nord, øst = get_coordinates(params)
+            nord, øst = get_coordinates(params['sok'])
             df.at[index, 'Nord'] = nord
             df.at[index, 'Øst'] = øst
 
